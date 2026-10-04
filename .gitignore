@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+# flight data and outputs, kept locally
+photos/
+recordings/
+odm/*/
+*.db
+
+# local reference material, not published: the FIMI app packages, its
+# firmware and server catalogs, and reverse-engineering notes
+apks/
+firmware/
+openfimi/

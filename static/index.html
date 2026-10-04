@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fimi Route Editor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <h1>Fimi Route Editor</h1>
+  <span id="dbname" class="muted"></span>
+  <span class="spacer"></span>
+  <label class="chk">Speed in
+    <select id="speedunit"><option value="kmh">km/h</option><option value="ms">m/s</option></select>
+  </label>
+  <label class="chk"><input type="checkbox" id="rawmode"> Raw enum values</label>
+  <span id="status" class="status"></span>
+  <button id="save" class="primary" disabled>Save</button>
+  <button id="revert" disabled>Revert</button>
+  <button id="push" title="Replace the route database on the phone with this one">Send to phone</button>
+  <button id="manualfly" title="Fly by hand with openfimi: video, map, status and flight controls, with take-off and land, and no route">Manual flight</button>
+  <button id="fly" title="Fly the open route with openfimi: connect to the aircraft, launch, watch telemetry and video">Fly</button>
+  <button id="flyexit" hidden title="Back to the route editor; the connection stays open">Back to editor</button>
+</header>
+
+<main id="layout">
+
+  <aside id="routes">
+    <div class="panel-head">
+      <span>Routes</span>
+      <span class="head-btns">
+        <button id="survey" class="mini" title="Plan a grid of overhead photos over a rectangle and create the routes for it">+ Grid</button>
+        <button id="newroute" class="mini">+ New</button>
+      </span>
+    </div>
+    <input id="filter" type="search" placeholder="Filter routes…">
+    <ul id="routelist"></ul>
+  </aside>
+
+  <section id="mapwrap">
+    <div id="videopanel" hidden>
+      <img id="fpv" alt="">
+      <div id="fpvmsg">No video</div>
+      <button id="fl-srec" class="srec" title="Save the video stream shown here to the recordings folder on this computer. Separate from the aircraft's own recording, so it also works during photo routes.">● Record stream</button>
+    </div>
+    <div id="map"></div>
+    <div id="pushpanel" hidden>
+      <div class="panel-head"><span id="pushtitle">Send to phone</span><button id="pushclose" class="mini">Close</button></div>
+      <pre id="pushlog"></pre>
+    </div>
+    <div id="surveypanel" hidden>
+      <div class="panel-head"><span>Survey grid</span><span class="head-btns"><button id="surveyfold" class="mini" title="Fold the panel up to its title bar to clear the map" aria-expanded="true">&#9652;</button><button id="surveyclose" class="mini">Cancel</button></span></div>
+      <div id="surveybody">
+        <p id="surveyhint" class="hint"></p>
+        <div class="form">
+          <label><span>Survey altitude (m)</span><input id="sv-alt" type="number" min="1" max="500" step="1" value="60"></label>
+          <label><span>Camera zoom (×, 1–6)</span><input id="sv-zoom" type="number" min="1" max="6" step="0.1" value="1"></label>
+          <label><span>Image overlap (%)</span><input id="sv-overlap" type="number" min="0" max="90" step="1" value="70"></label>
+          <label><span>Area (E-W × N-S)</span><input id="sv-area" readonly></label>
+          <label><span>Flight lines</span><select id="sv-lines"><option value="ew">East-west, flown sideways</option><option value="ns">North-south</option><option value="auto">Fewest turns</option></select></label>
+          <label><span id="sv-speedcap">Speed</span><input id="sv-speed" type="number" min="1" step="1"></label>
+          <label><span>Photo action</span><select id="sv-settle"><option value="hover">After 5 s hover (heading settles)</option><option value="single">Single photo on arrival</option></select></label>
+          <label><span>Heading</span><select id="sv-heading"><option value="poi">POI north at every waypoint</option><option value="leadin">Lead-in POI, then Free hold</option></select></label>
+          <label><span>Lead-in points</span><select id="sv-leadins"><option value="none">None</option><option value="all">Every route</option><option value="first">First route only</option></select></label>
+          <label><span>Oblique pass</span><select id="sv-obliques"><option value="0">Off</option><option value="4">4 around the area</option><option value="6">6 around the area</option><option value="8">8 around the area</option><option value="12">12 around the area</option></select></label>
+          <label><span>Oblique pitch (° down)</span><input id="sv-oblpitch" type="number" min="10" max="85" step="5" value="45"></label>
+          <label><span>High pass altitude (m above take-off, blank = off)</span><input id="sv-high" type="number" min="0" max="500" step="5" placeholder="off"></label>
+        </div>
+        <div id="surveystats" class="stats"></div>
+        <p class="hint">Camera model: 79° diagonal field of view, 4:3 stills, digital zoom crops the frame; ground assumed flat at the take-off point. Routes are saved straight to the database as favourites, 20 waypoints each; every route but the last ends in a hover where the next begins, and each is linked to the next (its Next route), so openfimi flies them back to back, battery permitting. With the default heading, every waypoint carries a point of interest 500 m due north of the waypoint before it, because the aircraft applies a waypoint's POI to the photo taken at the point before (measured on three flights), and each route ends with a photo-less tail point carrying the POI for its last photo; the 5 s hover lets the turn settle before the shutter; with the lead-in option only the lead-in carries a POI and Free mode holds the heading. East-west lines are flown sideways, which keeps a −90° gimbal in place. Flown with openfimi, every waypoint re-sets the gimbal to the route's pitch (straight down for the grid) on the way in, so any slight drift is corrected before each photo; with the FIMI app nothing in a route can move the gimbal, so set it by hand before starting. The oblique pass is a separate route around the outside of the area, every point looking inward at a ground target placed so the view dips by the chosen pitch. Every waypoint gets the same speed, so the FIMI app and openfimi fly it alike. The high pass repeats the grid higher up as extra routes to fly afterwards.</p>
+        <div class="row-btns pad">
+          <button id="surveyredraw" class="mini">Redraw area</button>
+          <span class="spacer"></span>
+          <button id="surveycreate" class="primary" disabled>Create routes</button>
+        </div>
+      </div>
+    </div>
+    <div id="maptools">
+      <label class="chk editonly"><input type="checkbox" id="addmode" checked> Click map to add waypoint</label>
+      <span class="sep editonly"></span>
+      <span id="mapinfo" class="muted"></span>
+      <span class="spacer"></span>
+      <span id="zoominfo" class="muted"></span>
+    </div>
+  </section>
+
+  <aside id="props">
+    <div id="noroute" class="empty">Select a route on the left, or create a new one.</div>
+
+    <div id="editor" hidden>
+      <div class="panel-head">
+        <span>Route settings</span>
+        <span id="routeid" class="muted"></span>
+      </div>
+      <div id="routeform" class="form"></div>
+
+      <div class="panel-head">
+        <span>Waypoints (<span id="wpcount">0</span>)</span>
+        <span class="head-btns">
+          <button id="applyall" class="mini" title="Copy altitude, speed and gimbal pitch from the selected waypoint to every waypoint">Apply to all</button>
+          <button id="aimnorth" class="mini" title="Give every waypoint a POI 500 m due north of the waypoint before it, as the survey planner does. Routes with that pattern keep it automatically when points are moved or deleted.">POIs north</button>
+          <button id="delroute" class="mini danger">Delete route</button>
+        </span>
+      </div>
+      <div id="fieldkey">
+        <b class="k-unlocked">★</b> loaded and flown, and the app's planner cannot set it &nbsp;
+        <b class="k-substituted">⊘</b> protocol carries it, the app overwrites it &nbsp;
+        <b class="k-openfimi">◆</b> openfimi only: the app ignores it, openfimi flies it
+      </div>
+      <div id="photobar">
+        <div id="photohint" class="hint"></div>
+        <div id="photoctl" hidden>
+          <label>Transparency (%)<input id="kml-alpha" type="number" min="0" max="100" step="5" value="30"></label>
+          <label>Zoom used (×)<input id="kml-zoom" type="number" min="1" max="6" step="0.1" value="1"></label>
+          <button id="kmlexport" class="mini primary" title="Write a Google Earth KML of the photos, as north-up ground overlays, into this route's photo folder">Export KML</button>
+          <button id="photoclear" class="mini" title="Remove this route's photos">Clear</button>
+        </div>
+        <div id="photomsg" class="hint"></div>
+        <input id="photofile" type="file" accept="image/*" multiple hidden>
+      </div>
+      <ol id="wplist"></ol>
+    </div>
+  </aside>
+
+  <aside id="flightpanel" hidden>
+    <section class="fl-sec" data-sec="flight">
+      <div class="panel-head"><span>Flight</span><span id="fl-route" class="muted"></span></div>
+      <div class="fl-body fl-controls">
+        <div class="fl-row">
+          <input id="fl-url" type="text" placeholder="phone IP[:port], tcp://…, usb, replay://…" title="A plain IP or IP:port means the openfimi bridge over TCP (port 10052 by default)" spellcheck="false">
+          <button id="fl-connect">Connect</button>
+        </div>
+        <div class="fl-row">
+          <label class="switch routeonly" title="Hands-off launch: once connected, wait for the aircraft to power on, for GPS and a home point, and for it to be set down level and still for 5 s, then take off and fly the route without asking"><input type="checkbox" id="fl-auto"><span class="slider"></span> Auto launch</label>
+          <label class="chk" title="Satellites required before take-off">Min sats <input id="fl-sats" type="number" min="4" max="40" step="1" value="10"></label>
+          <span class="spacer"></span>
+          <button id="fl-launch" class="primary routeonly" title="Check the aircraft now and, if it is ready, take off and fly the route">Launch</button>
+          <button id="fl-takeoff" class="primary manualonly" title="Run the pre-flight checks and take off to a hover">Take off</button>
+          <button id="fl-land" class="manualonly" title="Land where it is now">Land</button>
+          <button id="fl-home" class="manualonly" title="Return home and land (the emergency button's commands, without the alarm)">Return home</button>
+        </div>
+        <div class="fl-row routeonly">
+          <label class="chk fl-next" title="Fly this route straight after the current one ends: as soon as its last waypoint is done, cancelling its return home. Defaults to the route's stored link; can be changed during the flight.">Then <select id="fl-next"></select></label>
+          <label class="chk" title="Skip the next route, and let the aircraft come home, if it is forecast to finish (including the flight home) below this battery level">Floor <input id="fl-floor" type="number" min="0" max="90" step="5" value="25">%</label>
+        </div>
+        <div id="fl-chain" class="hint routeonly"></div>
+        <div id="fl-phase" class="fl-phase"></div>
+      </div>
+    </section>
+    <section class="fl-sec" data-sec="aircraft">
+      <div class="panel-head"><span>Aircraft</span><span id="fl-age" class="muted"></span></div>
+      <div id="fl-tele" class="fl-body fl-tele"></div>
+    </section>
+    <section class="fl-sec" data-sec="controls">
+      <div class="panel-head"><span>Flight controls</span></div>
+      <div class="fl-body fl-ctl">
+        <button id="fl-rth" class="rth" title="Stop the route, a pending launch and keyboard control, and return home and land. Works at any time while connected.">EMERGENCY RETURN HOME</button>
+        <div class="fl-row">
+          <button id="fl-photo" title="Take a photo">Photo</button>
+          <button id="fl-rec" title="Start or stop recording video">Record</button>
+          <span class="spacer"></span>
+          <span class="muted">Gimbal</span>
+          <button id="fl-gup" class="mini" title="Tilt up 5° (PgUp)">▲</button>
+          <button id="fl-gdown" class="mini" title="Tilt down 5° (PgDn)">▼</button>
+          <button id="fl-glevel" class="mini" title="Level (0°)">0°</button>
+          <button id="fl-gnadir" class="mini" title="Straight down (-90°)">-90°</button>
+        </div>
+        <div class="fl-row">
+          <label class="switch" title="Fly with the keyboard using short autopilot (fly-to) moves: WASD moves relative to the desired heading, up/down arrows climb and descend, left/right arrows turn by pointing a POI (the aircraft ignores stick commands over the remote's link). Releasing every key, or 0.6 s without an update, stops and hovers."><input type="checkbox" id="fl-manual"><span class="slider"></span> Keyboard control</label>
+          <span class="spacer"></span>
+          <label class="chk" title="How far ahead each nudge aims while a key is held (and a fraction of it up or down). Releasing the key stops the move, so this sets how committed each move is rather than how far a tap goes.">Step <input id="fl-step" type="number" min="2" max="50" step="1" value="25"> m</label>
+        </div>
+        <div class="pad" id="fl-pad">
+          <div class="pad-group">
+            <span></span><kbd data-key="w">W</kbd><span></span>
+            <kbd data-key="a">A</kbd><kbd data-key="s">S</kbd><kbd data-key="d">D</kbd>
+            <small>move</small>
+          </div>
+          <div class="pad-group">
+            <span></span><kbd data-key="ArrowUp">↑</kbd><span></span>
+            <kbd data-key="ArrowLeft">←</kbd><kbd data-key="ArrowDown">↓</kbd><kbd data-key="ArrowRight">→</kbd>
+            <small>height · turn</small>
+          </div>
+          <div class="pad-group pad-gimbal">
+            <kbd data-key="PageUp">PgUp</kbd><kbd data-key="PageDown">PgDn</kbd>
+            <small>gimbal</small>
+          </div>
+        </div>
+        <p class="hint warn-hint">The aircraft ignores virtual sticks through the remote, so keys fly nudges: short one-point routes relative to the desired heading, which ←/→ swing. Each starts about 1 s after the key and accelerates gently (a 3 s press moves 1–2 m). Flight-tested for turns, moves and climbs; the remote's own sticks always win.</p>
+      </div>
+    </section>
+    <section class="fl-sec manualonly" data-sec="goto">
+      <div class="panel-head"><span>Go to</span></div>
+      <div class="fl-body fl-ctl">
+        <div class="fl-row">
+          <button id="gt-pick" title="Click the map to choose where to go">Pick on map</button>
+          <span id="gt-target" class="muted gt-target">No target: altitude changes happen here</span>
+          <button id="gt-clear" class="mini" title="Forget the target">✕</button>
+        </div>
+        <div class="fl-row gt-grid">
+          <label class="chk">Altitude (m) <input id="gt-alt" type="number" min="2" max="120" step="1"></label>
+          <label class="chk"><span id="gt-speedcap">Speed</span> <input id="gt-speed" type="number" min="1" step="1"></label>
+        </div>
+        <div class="fl-row gt-grid">
+          <label class="chk">Facing <select id="gt-facing">
+            <option value="travel">the target (direction of travel)</option>
+            <option value="current">current heading</option>
+            <option value="bearing">compass bearing…</option>
+            <option value="point">a point on the map…</option>
+          </select></label>
+          <input id="gt-bearing" type="number" min="0" max="359" step="5" placeholder="°" title="Compass bearing to face, 0 = north" hidden>
+          <button id="gt-facepick" class="mini" hidden title="Click the map: the aircraft will face that point from the target">Pick point</button>
+          <label class="chk" title="Gimbal pitch to set when the move starts; blank leaves it">Gimbal <input id="gt-gimbal" type="number" min="-90" max="0" step="5" placeholder="leave"></label>
+        </div>
+        <div class="fl-row">
+          <button id="gt-go" class="primary" title="Fly to the target at the altitude and speed above">Go</button>
+          <button id="gt-alt-only" title="Change altitude and facing without moving: climbs or descends straight, and turns in place to the facing chosen">Apply here</button>
+          <span class="spacer"></span>
+          <button id="gt-hover" title="Stop the move and hold position">Hover</button>
+        </div>
+        <p class="hint gt-hint">Flown like the keyboard nudges: a one-point route to the target with a point of interest 500 m along the facing (flight-tested for moves, straight climbs and turns in place). A new Go, a nudge, Hover or Land replaces it mid-move.</p>
+      </div>
+    </section>
+    <section class="fl-sec routeonly" data-sec="route">
+      <div class="panel-head"><span>Route</span><label class="chk"><input type="checkbox" id="fl-follow" checked> Keep aircraft in view</label></div>
+      <div class="fl-body">
+        <div id="fl-stats" class="fl-tele"></div>
+        <ol id="fl-wps"></ol>
+      </div>
+    </section>
+    <section class="fl-sec" data-sec="log">
+      <div class="panel-head"><span>Log</span></div>
+      <pre id="fl-log" class="fl-body"></pre>
+    </section>
+  </aside>
+
+</main>
+
+<div id="lightbox" hidden><img id="lightboximg" alt=""><div id="lightboxcap"></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
