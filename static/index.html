@@ -120,6 +120,16 @@
           <button id="photoclear" class="mini" title="Remove this route's photos">Clear</button>
         </div>
         <div id="photomsg" class="hint"></div>
+        <div id="orthobar" hidden>
+          <div id="orthoinfo" class="hint"></div>
+          <div id="orthoctl">
+            <button id="orthobuild" class="mini primary" title="Stage the photos of every route in this chain and run OpenDroneMap on them (odm/run.sh, GPU if available); the results go in a new folder under odm/">Build orthophoto</button>
+            <button id="orthocancel" class="mini" hidden>Cancel</button>
+            <label id="orthoshowlbl" hidden title="Lay the orthophoto over the map"><input type="checkbox" id="orthoshow"> Show on map</label>
+            <input id="orthoopacity" type="range" min="0.2" max="1" step="0.05" value="0.9" title="Orthophoto opacity" hidden>
+          </div>
+          <div id="orthomsg" class="hint"></div>
+        </div>
         <input id="photofile" type="file" accept="image/*" multiple hidden>
       </div>
       <ol id="wplist"></ol>

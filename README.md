@@ -18,7 +18,9 @@ per-waypoint gimbal control, which the FIMI app can't do.
   from the camera's field of view, overlap, altitude and zoom), split into
   linked routes of up to 20 waypoints, with optional oblique and high passes.
 - Photos from a survey can be dropped onto the route and exported to Google
-  Earth as ground overlays (KML), or staged for OpenDroneMap (`odm/`).
+  Earth as ground overlays (KML), or built into an **orthophoto** with
+  OpenDroneMap (Docker) from the photos of the whole grid, in one click, and
+  laid over the map (`odm/`).
 
 **Flying with openfimi** (Fly / Manual flight)
 - Connect through the openfimi phone bridge or a USB gadget; launch by hand or

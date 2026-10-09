@@ -753,6 +753,59 @@ def api_duplicate(rid):
         conn.close()
 
 
+# ------------------------------------------------------------- orthophotos
+# Build an orthophoto with OpenDroneMap from the photos of a route's whole
+# chain (the grid's routes linked by Next route): see ortho.py. Like the
+# flight controls, POSTs need a JSON body.
+_ortho = None
+
+
+def ortho_builder():
+    global _ortho
+    if _ortho is None:
+        import ortho
+        _ortho = ortho.OrthoBuilder(DB_PATH, PHOTO_ROOT)
+    return _ortho
+
+
+@app.get("/api/routes/<int:rid>/ortho")
+def api_ortho_status(rid):
+    try:
+        return jsonify(ortho_builder().status(rid))
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.post("/api/routes/<int:rid>/ortho")
+def api_ortho_start(rid):
+    if not request.is_json:
+        abort(415)
+    try:
+        project = ortho_builder().start(rid)
+    except (ValueError, KeyError) as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"project": project})
+
+
+@app.post("/api/ortho/cancel")
+def api_ortho_cancel():
+    if not request.is_json:
+        abort(415)
+    try:
+        ortho_builder().cancel()
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"ok": True})
+
+
+@app.get("/api/ortho/<project>/preview.png")
+def api_ortho_preview(project):
+    import ortho
+    if "/" in project or project.startswith("."):
+        abort(404)
+    return send_from_directory(os.path.join(ortho.ODM_DIR, project), "preview.png", max_age=3600)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Fimi route database web editor")
     ap.add_argument("--db", default=DB_PATH, help="path to the route database (default: fimi.db)")

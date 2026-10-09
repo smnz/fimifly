@@ -11,20 +11,12 @@ so OpenSfM can seed its camera model: 4.71 mm, and a 35 mm equivalent of
     ./odm/stage.py <project> --routes 10 11 12
     ./odm/stage.py <project> --dir /media/$USER/SDCARD/DCIM/100DRONE --newest 60
 """
-import argparse, os, re, shutil, sqlite3, subprocess, sys
-from PIL import Image
+import argparse, os, sqlite3, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-IMAGE_EXTS = (".jpg", ".jpeg")
-
-
-def capture_time(path):
-    try:
-        ex = Image.open(path).getexif().get_ifd(0x8769)
-        return str(ex.get(36867) or "")
-    except Exception:
-        return ""
+sys.path.insert(0, ROOT)
+from ortho import IMAGE_EXTS, capture_time, stage_photos  # noqa: E402
 
 
 def route_ids_by_pattern(pattern):
@@ -61,24 +53,11 @@ def main():
         sys.exit("no photos found")
 
     dest = os.path.join(HERE, a.project, "images")
-    if os.path.isdir(dest) and os.listdir(dest):
-        sys.exit("%s already has images; remove it or pick another project name" % dest)
-    os.makedirs(dest, exist_ok=True)
-    names = set()
-    for src in sorted(sources, key=capture_time):
-        name = os.path.basename(src)
-        if name in names:                       # same file name from two routes: keep both
-            stem, ext = os.path.splitext(name)
-            k = 2
-            while "%s_%d%s" % (stem, k, ext) in names:
-                k += 1
-            name = "%s_%d%s" % (stem, k, ext)
-        names.add(name)
-        shutil.copy2(src, os.path.join(dest, name))
-    if not a.no_exif_fix:
-        subprocess.run(["exiftool", "-overwrite_original", "-q", "-FocalLength=4.71", "-FocalLengthIn35mmFormat=27",
-                        "-DigitalZoomRatio=1", dest], check=True)
-    print("staged %d photos in %s" % (len(names), dest))
+    try:
+        n = stage_photos(dest, sources, fix_exif=not a.no_exif_fix)
+    except ValueError as e:
+        sys.exit("%s; remove it or pick another project name" % e)
+    print("staged %d photos in %s" % (n, dest))
     print("next: ./odm/run.sh %s" % a.project)
 
 

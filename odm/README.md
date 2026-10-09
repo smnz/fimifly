@@ -1,5 +1,14 @@
 # Reconstruction with OpenDroneMap
 
+From the editor: open any route of the grid, attach each route's photos, and
+press **Build orthophoto** in the photo panel. It takes every route of the
+chain (the routes linked by Next route, both ways), stages their photos and
+runs `run.sh` below in the background, in a new folder named after the grid
+(`odm/grid-1oct-0930`, say). When it is done the orthophoto can be laid over
+the map (Show on map); the files are those listed under 4.
+
+By hand:
+
 1. Attach the flight's photos to their routes in the editor (or keep them in a folder).
 2. Stage them: `./odm/stage.py flight1 --like '%grid 13Sep%'` (route name pattern),
    `./odm/stage.py flight1 --routes 10 11 12`, or `./odm/stage.py flight1 --dir <folder> --newest 60`.

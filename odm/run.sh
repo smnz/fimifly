@@ -21,7 +21,9 @@ if command -v nvidia-container-runtime >/dev/null 2>&1; then
 else
   echo "nvidia-container-runtime not installed: running the CPU image (sudo apt install nvidia-container-toolkit to use the GPU)"
 fi
-exec docker run --rm "${GPU[@]}" \
+# a name, so the editor's Cancel can stop it (docker kill)
+NAME=(); [ -n "${ODM_CONTAINER:-}" ] && NAME=(--name "$ODM_CONTAINER")
+exec docker run --rm "${NAME[@]}" "${GPU[@]}" \
   -v "$HERE:/datasets" \
   "$IMAGE" \
   --project-path /datasets "$PROJECT" \

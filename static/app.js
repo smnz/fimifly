@@ -526,6 +526,7 @@ async function openRoute(id) {
   state.dirty = false;
   await loadPhotos();
   photoMsg('');
+  loadOrtho();
   $('save').disabled = true;
   $('revert').disabled = true;
   setStatus('');
@@ -961,6 +962,7 @@ function photoMsg(text, cls) {
 }
 
 function renderPhotoBar() {
+  renderOrtho();
   const hint = $('photohint'), ctl = $('photoctl');
   const { photos, wps } = expectedPhotos(state.route.points);
   const ph = state.photos;
@@ -1003,6 +1005,7 @@ async function uploadPhotos(fileList) {
     state.photos = d;
     photoMsg('');
     renderWaypoints();
+    loadOrtho();
     setStatus('Photos attached', 'ok');
   } catch (e) {
     photoMsg('Upload failed: ' + e.message, 'warn');
@@ -1016,6 +1019,7 @@ async function clearPhotos() {
   await loadPhotos();
   photoMsg('');
   renderWaypoints();
+  loadOrtho();
 }
 
 async function exportKml() {
@@ -1032,6 +1036,100 @@ async function exportKml() {
   } finally {
     $('kmlexport').disabled = false;
   }
+}
+
+// ------------------------------------------------------------ orthophoto
+// Every route of the open route's chain (its Next route links, both ways)
+// with photos attached goes into one OpenDroneMap build on the server. While
+// one runs, the status is polled; the finished orthophoto can be laid over
+// the map (a web-Mercator PNG the server makes from ODM's GeoTIFF).
+const ortho = { st: null, rid: null, timer: null, layer: null, project: null };
+const ORTHO_RUNNING = ['staging', 'running', 'preview'];
+
+async function loadOrtho() {
+  clearTimeout(ortho.timer);
+  const rid = state.route && state.route._id;
+  ortho.rid = rid;
+  if (rid == null) { ortho.st = null; renderOrtho(); return; }
+  try { ortho.st = await api('GET', '/api/routes/' + rid + '/ortho'); } catch (e) { ortho.st = null; }
+  if (ortho.rid !== rid) return;              // another route was opened meanwhile
+  renderOrtho();
+  const b = ortho.st && ortho.st.build;
+  if ((b && ORTHO_RUNNING.includes(b.state)) || (ortho.st && ortho.st.busy)) ortho.timer = setTimeout(loadOrtho, 3000);
+}
+
+function fmtDuration(s) {
+  s = Math.max(0, Math.round(s));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function renderOrtho() {
+  const bar = $('orthobar'), st = ortho.st;
+  const b = st && st.build, out = b && b.outputs;
+  if (!st || !st.photos) { bar.hidden = true; orthoLayer(null); return; }
+  bar.hidden = false;
+  const ids = st.chain.map((c) => '#' + c.id);
+  const missing = st.chain.filter((c) => !c.photos);
+  const info = $('orthoinfo');
+  info.textContent = 'Orthophoto from ' + (st.chain.length > 1 ? 'the chain ' + ids.join(' → ') : 'this route') +
+    ': ' + st.photos + ' photos' + (missing.length ? '; no photos yet on ' + missing.map((c) => '#' + c.id).join(', ') : '') + '.';
+  info.className = 'hint' + (missing.length ? ' warn' : '');
+  const running = b && ORTHO_RUNNING.includes(b.state);
+  const msg = $('orthomsg');
+  let text = '', cls = '';
+  if (running) {
+    const el = fmtDuration(Date.now() / 1000 - b.started);
+    text = b.state === 'staging' ? 'Copying ' + b.photos + ' photos into odm/' + b.project + '/images…'
+         : b.state === 'preview' ? 'Making the map preview…'
+         : 'OpenDroneMap: ' + (b.stage ? b.stage + ' (stage ' + b.stage_i + '/' + b.stages + ', about ' + Math.round(b.progress * 100) + '%)' : 'starting');
+    text += ' · ' + el + ' elapsed';
+  } else if (b && b.state === 'done') {
+    text = 'Built ' + new Date(b.finished * 1000).toLocaleString() + ' in ' + fmtDuration(b.finished - b.started) +
+           ' min from ' + b.photos + ' photos: ' + b.dir + (out && out.kmz ? '  (Google Earth: ' + out.kmz + ')' : '');
+    cls = 'ok';
+  } else if (b && b.state === 'failed') { text = 'Build failed: ' + b.error; cls = 'warn'; }
+  else if (b && b.state === 'cancelled') { text = 'Build cancelled (' + b.dir + ').'; cls = 'warn'; }
+  else if (b && b.state === 'interrupted') { text = 'Build interrupted: the app stopped while it ran (' + b.dir + ').'; cls = 'warn'; }
+  if (st.busy) { text = 'Another build is running (odm/' + st.busy.project + '); one at a time.'; cls = 'warn'; }
+  msg.textContent = text;
+  msg.className = 'hint ' + cls;
+  const build = $('orthobuild');
+  build.textContent = b && b.state === 'done' ? 'Rebuild orthophoto' : 'Build orthophoto';
+  build.disabled = !!running || !!st.busy || missing.length > 0;
+  build.title = missing.length ? 'Attach the photos of every route in the chain first' : build.title;
+  $('orthocancel').hidden = !running;
+  const can = !!(out && out.preview);
+  $('orthoshowlbl').hidden = !can;
+  if (!can) $('orthoshow').checked = false;
+  $('orthoopacity').hidden = !can || !$('orthoshow').checked;
+  orthoLayer(can && $('orthoshow').checked ? out : null, b && b.project);
+}
+
+function orthoLayer(out, project) {
+  if (!out) {
+    if (ortho.layer) { ortho.layer.remove(); ortho.layer = null; ortho.project = null; }
+    return;
+  }
+  if (ortho.layer && ortho.project === project) return;
+  if (ortho.layer) ortho.layer.remove();
+  ortho.layer = L.imageOverlay(out.preview, out.bounds, { opacity: Number($('orthoopacity').value), interactive: false }).addTo(map);
+  ortho.project = project;
+}
+
+async function buildOrtho() {
+  const st = ortho.st;
+  if (!st) return;
+  const mins = Math.max(2, Math.round(st.photos / 8));
+  if (!confirm('Build an orthophoto from the ' + st.photos + ' photos of ' + st.chain.length + ' route' +
+               (st.chain.length === 1 ? '' : 's') + ' with OpenDroneMap?\n\nIt runs in the background and takes roughly ' +
+               mins + ' minutes on the GPU. The results go in a new folder under odm/.')) return;
+  const r = await fetch('/api/routes/' + state.route._id + '/ortho', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) { $('orthomsg').textContent = 'Could not start: ' + (d.error || r.status); $('orthomsg').className = 'hint warn'; return; }
+  setStatus('Orthophoto build started: odm/' + d.project, 'ok');
+  loadOrtho();
 }
 
 function photoUrl(name, thumb) {
@@ -1694,6 +1792,17 @@ async function surveyCreate() {
 
 // -------------------------------------------------------------- wiring
 $('kmlexport').addEventListener('click', exportKml);
+$('orthobuild').addEventListener('click', buildOrtho);
+$('orthocancel').addEventListener('click', async () => {
+  if (!confirm('Stop the orthophoto build? What it has done so far is kept in its folder.')) return;
+  try { await api('POST', '/api/ortho/cancel', {}); } catch (e) { setStatus(e.message, 'err'); }
+  loadOrtho();
+});
+$('orthoshow').addEventListener('change', () => {
+  renderOrtho();
+  if ($('orthoshow').checked && ortho.layer) map.fitBounds(ortho.layer.getBounds(), { padding: [20, 20] });
+});
+$('orthoopacity').addEventListener('input', (e) => { if (ortho.layer) ortho.layer.setOpacity(Number(e.target.value)); });
 $('photoclear').addEventListener('click', clearPhotos);
 $('photofile').addEventListener('change', (e) => { uploadPhotos(e.target.files); e.target.value = ''; });
 for (const ev of ['dragenter', 'dragover']) $('props').addEventListener(ev, (e) => {
