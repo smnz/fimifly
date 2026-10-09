@@ -144,7 +144,8 @@
           <button id="fl-home" class="manualonly" title="Return home and land (the emergency button's commands, without the alarm)">Return home</button>
         </div>
         <div class="fl-row routeonly">
-          <label class="chk fl-next" title="Fly this route straight after the current one ends: as soon as its last waypoint is done, cancelling its return home. Defaults to the route's stored link; can be changed during the flight.">Then <select id="fl-next"></select></label>
+          <label class="chk fl-next" title="Fly this route straight after the current one ends: as soon as its last waypoint is done, cancelling its return home. Defaults to the route's stored link; choosing one during the flight replaces whatever was queued. Once a route has finished and the aircraft is hovering, use Fly now to start it.">Then <select id="fl-next"></select></label>
+          <button id="fl-nextnow" title="Fly the chosen next route now: stops the current route where it is (or starts from the hover), after the battery-floor and temperature checks">Fly now</button>
           <label class="chk" title="Skip the next route, and let the aircraft come home, if it is forecast to finish (including the flight home) below this battery level">Floor <input id="fl-floor" type="number" min="0" max="90" step="5" value="25">%</label>
         </div>
         <div id="fl-chain" class="hint routeonly"></div>

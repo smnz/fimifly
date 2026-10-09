@@ -236,6 +236,17 @@ class StreamRecorder:
         self.wake.set()
 
 
+class _Either:
+    """Set when either event is: the route monitor's cancel, so a Fly next
+    now stops following a route without ending the flight's chain."""
+
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+
+    def is_set(self):
+        return self.a.is_set() or self.b.is_set()
+
+
 class FlightSession:
     """The single aircraft connection. Every public method is thread-safe."""
 
@@ -250,6 +261,8 @@ class FlightSession:
         #                                    | returning (Return home) | landing (Land, in place)
         self.route_id = None               # route being (or last) flown
         self.next_id = None                # route to chain when this one completes (None = stop)
+        self.next_linked = False           # next_id came from a route's stored link, not the pilot
+        self.skip = threading.Event()      # Fly next now: leave the current route for the next
         self.min_finish = MIN_FINISH_PCT
         self.takeoff_batt = None           # (monotonic time, battery %) at take-off, for the drain rate
         self.auto = False
@@ -396,6 +409,7 @@ class FlightSession:
         with self.lock:
             if next_id is not False:
                 self.next_id = int(next_id) if next_id else None
+                self.next_linked = False
             if min_finish is not None:
                 self.min_finish = max(0, min(90, int(min_finish)))
         if route_id is None and auto is None and min_sats is None:
@@ -444,14 +458,15 @@ class FlightSession:
     def _fly(self, d, mission, auto, cancel, min_sats):
         self.say(("auto launch armed: " if auto else "launching: ")
                  + "%d waypoints, at least %d satellites" % (len(mission.waypoints), min_sats))
+        self._run(cancel, lambda: self._chain(d, d.fly_route(
+            mission, wait_ready=AUTO_WAIT_S if auto else 0.0, min_satellites=min_sats,
+            on_event=self.say, cancel=_Either(cancel, self.skip),
+            stop_at_end=self._chaining), cancel))
+
+    def _run(self, cancel, body):
+        """The launch thread's outcome: the phase and the log's last word."""
         try:
-            with self.lock:
-                chain = self.next_id is not None
-            res = d.fly_route(mission, wait_ready=AUTO_WAIT_S if auto else 0.0,
-                              min_satellites=min_sats, on_event=self.say, cancel=cancel,
-                              stop_at_end=chain)
-            if chain:
-                res = self._chain(d, res, cancel)
+            res = body()
             with self.lock:
                 rth = self.phase in RETURNING
                 if not rth:
@@ -473,14 +488,40 @@ class FlightSession:
             # (after a reconnect, say) without the pilot switching it back on.
             with self.lock:
                 was, self.auto = self.auto, False
+                self.skip.clear()
             if was:
                 self.say("auto launch off")
 
-    def _chain(self, d, res, cancel):
-        """Fly the linked routes one after another, each as soon as the last
-        waypoint of the one before is done (cancelling its return home).
+    def _chaining(self):
+        """Asked as each route ends: is there a next route to go on to?"""
+        with self.lock:
+            return self.next_id is not None and not self.cancel.is_set()
 
-        Stops when a route was cut short, a launch is cancelled, the chain
+    def _check_next(self, d, nxt):
+        """(info, mission, battery now, battery the route needs) for route
+        ``nxt``, or ValueError saying why it can't be flown from here now."""
+        try:
+            info = route_info(self.db_path, nxt)
+            mission = mission_from_fimi_db(self.db_path, nxt)
+        except Exception as e:  # noqa: BLE001 - deleted or empty route
+            raise ValueError("route #%d could not be loaded: %s" % (nxt, e)) from e
+        hot = too_hot(d)
+        if hot:
+            raise ValueError("%s skipped: %s" % (info["name"], hot))
+        with self.lock:
+            floor = self.min_finish
+        left, need, why = battery_forecast(d, info, self.takeoff_batt)
+        if left is not None and left - need < floor:
+            raise ValueError("%s skipped: battery %d%% now, would finish near %d%% (floor %d%%; %s)"
+                             % (info["name"], left, left - need, floor, why))
+        return info, mission, left, need
+
+    def _chain(self, d, res, cancel):
+        """Fly the next routes one after another, each as soon as the one
+        before has flown its last waypoint (cancelling its return home), or
+        at once when the pilot asked for it (Fly next now).
+
+        Stops when a route was cut short, a launch is cancelled, a stored link
         loops, the aircraft is too hot (overheat alarm, or the battery at
         MAX_TEMP_C), or the battery would end below the floor; then the finish action
         of the route just flown (normally a return home) is left to happen, and
@@ -489,49 +530,76 @@ class FlightSession:
         seen = {self.route_id}
         while True:
             with self.lock:
-                nxt, floor = self.next_id, self.min_finish
+                nxt, linked = self.next_id, self.next_linked
+                asked = self.skip.is_set()
+                self.skip.clear()
             if nxt is None or cancel.is_set():
                 return res
-            if not res.get("completed"):
+            if not res.get("completed") and not asked:
                 self.say("next route not started: this one did not complete")
                 return res
-            if nxt in seen:
+            if linked and nxt in seen:
                 self.say("next route not started: route #%d is already in this chain" % nxt)
                 return self._send_home(d, res)
             try:
-                info = route_info(self.db_path, nxt)
-                mission = mission_from_fimi_db(self.db_path, nxt)
-            except Exception as e:  # noqa: BLE001 - deleted or empty route
-                self.say("next route #%d could not be loaded: %s" % (nxt, e))
-                return self._send_home(d, res)
-            hot = too_hot(d)
-            if hot:
-                self.say("next route %s skipped: %s" % (info["name"], hot))
-                return self._send_home(d, res)
-            left, need, why = battery_forecast(d, info, self.takeoff_batt)
-            if left is not None and left - need < floor:
-                self.say("next route %s skipped: battery %d%% now, would finish near %d%% (floor %d%%; %s)"
-                         % (info["name"], left, left - need, floor, why))
+                info, mission, left, need = self._check_next(d, nxt)
+            except ValueError as e:
+                self.say("next route %s" % e)
                 return self._send_home(d, res)
             nav = d.state.navigation
             if nav and nav.task_mode == RTH_TASK_MODE:
                 r = d.send(commands.cancel_return_home(), timeout=3)
                 self.say("cancelled the route's return home" if r is None or r.ok
                          else "cancel return home refused (code %s)" % r.code)
+            else:
+                # still in a route (one left for Fly next now, or a hover
+                # finish, which stays in route mode at the last point) or a
+                # go-to's fly-to: end it first, as a mid-flight restart does
+                self._hover_quietly(d)
             with self.lock:
-                self.route_id, self.next_id = nxt, info["next_id"]
+                self.route_id, self.next_id, self.next_linked = nxt, info["next_id"], True
                 if self.phase not in RETURNING:
                     self.phase = "flying"
             seen.add(nxt)
             self.say("next route: %s (#%d, %d waypoints)%s" % (
                 info["name"], nxt, len(mission.waypoints),
                 "" if left is None else ", battery %d%%, expect about %d%% at the end" % (left, left - need)))
-            with self.lock:
-                more = self.next_id is not None
-            res = d.fly_route(mission, takeoff=False, on_event=self.say, cancel=cancel,
-                              stop_at_end=more)
-            if not more:
-                return res
+            res = d.fly_route(mission, takeoff=False, on_event=self.say,
+                              cancel=_Either(cancel, self.skip), stop_at_end=self._chaining)
+
+    def fly_next_now(self):
+        """Fly the queued next route now: stop the current route where it is,
+        or start from a hover. Refused, with the current route left flying,
+        if the next route fails the same checks a chain makes."""
+        d = self._drone()
+        with self.lock:
+            nxt, phase = self.next_id, self.phase
+            running = self.thread is not None and self.thread.is_alive()
+        if nxt is None:
+            raise ValueError("no next route chosen")
+        if not d.state.flying:
+            raise ValueError("not in the air: use Launch")
+        if phase in RETURNING:
+            raise ValueError("returning home or landing")
+        if running and phase != "flying":
+            raise ValueError("wait until the route has started")
+        info, _, _, _ = self._check_next(d, nxt)
+        if running:
+            self.say("flying %s now: stopping this route here" % info["name"])
+            self.skip.set()            # the route's monitor lets go; the chain flies the next
+            return
+        self._stop_manual(halt=False)
+        with self.lock:
+            if self.thread and self.thread.is_alive():
+                raise ValueError("a route flight is under way")
+            self.manual = False
+            self.goto_target = None
+            self.cancel = cancel = threading.Event()
+            self.skip.set()
+            self.thread = threading.Thread(
+                target=self._run, args=(cancel, lambda: self._chain(d, {}, cancel)), daemon=True)
+            self.thread.start()
+        self.say("flying %s now, from here" % info["name"])
 
     def _send_home(self, d, res):
         """After a chain stops: a route that ended in a hover would just sit

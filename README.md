@@ -27,7 +27,9 @@ per-waypoint gimbal control, which the FIMI app can't do.
   battery, temperature and the remote, and the route's progress.
 - Per-waypoint **gimbal pitch** applied during the route; per-waypoint speeds.
 - **Route chaining**: linked routes fly back to back, skipped if the battery
-  would finish below a floor or the aircraft is too hot.
+  would finish below a floor or the aircraft is too hot. The next route can be
+  changed in flight, and **Fly now** cuts the current route short (or starts
+  from a hover) to fly it at once.
 - **Manual flight**: take off, land, return home, keyboard nudges (WASD, arrows
   to climb and turn, PgUp/PgDn for the gimbal), and **Go to** a point picked on
   the map at a set altitude, speed and facing.

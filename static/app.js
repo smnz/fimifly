@@ -1976,15 +1976,15 @@ const GIMBAL_STEP = 5;
 const held = new Set();
 let stickTimer = null, sentZero = true;
 
-// The next-route list: every other route. The chain after it follows each
-// route's stored link, shown underneath.
+// The next-route list: every route, this one too (to fly it again). The chain
+// after it follows each route's stored link, shown underneath.
 function fillNextSelect() {
   const sel = $('fl-next');
   sel.textContent = '';
   sel.appendChild(new Option('None: finish here', 0));
   for (const r of state.routes) {
-    if (state.route && r._id === state.route._id) continue;
-    sel.appendChild(new Option((r.NAME || '(unnamed)') + ' #' + r._id, r._id));
+    const again = state.route && r._id === state.route._id ? ' (again)' : '';
+    sel.appendChild(new Option((r.NAME || '(unnamed)') + ' #' + r._id + again, r._id));
   }
 }
 
@@ -1993,7 +1993,7 @@ function chainText(first) {
   for (let id = first; id && names.length < 30; ) {
     const r = state.routes.find((x) => x._id === id);
     if (!r) { names.push('#' + id + ' (missing)'); break; }
-    if (seen.has(id)) { names.push('#' + id + ' (loop: stops here)'); break; }
+    if (seen.has(id) && names.length) { names.push('#' + id + ' (loop: stops here)'); break; }
     seen.add(id);
     names.push(r.NAME || '#' + id);
     id = r.AUTO_RECORD;
@@ -2011,6 +2011,9 @@ function renderControls(st) {
     }
     if (document.activeElement !== $('fl-floor')) $('fl-floor').value = st.min_finish;
     $('fl-chain').textContent = chainText(st.next_id);
+    const nn = $('fl-nextnow'), airborne = !!(st.tele && st.tele.flying);
+    const busy = ['waiting', 'launching', 'rth', 'returning', 'landing'].includes(st.phase);
+    nn.disabled = st.conn !== 'connected' || !airborne || !st.next_id || busy || (st.pending && st.phase !== 'flying');
   }
   const conn = st.conn === 'connected';
   const rthNow = st.phase === 'rth' || (st.tele && st.tele.rth && st.tele.flying && st.phase !== 'returning');
@@ -2411,6 +2414,15 @@ $('fl-auto').addEventListener('change', (e) => flightAction(async () => {
   return flightPost('config', { auto: on, min_sats: Number($('fl-sats').value) || 10 });
 }));
 $('fl-next').addEventListener('change', (e) => flightAction(() => flightPost('config', { next_id: Number(e.target.value) || null })));
+$('fl-nextnow').addEventListener('click', () => flightAction(async () => {
+  const st = fl.st || {}, id = st.next_id;
+  const r = state.routes.find((x) => x._id === id);
+  const name = r ? '"' + (r.NAME || '#' + id) + '"' : 'route #' + id;
+  const running = st.pending && st.phase === 'flying';
+  if (!confirm(running ? 'Stop "' + state.route.NAME + '" where it is and fly ' + name + ' now?'
+                       : 'Fly ' + name + ' now, from where the aircraft is?')) return;
+  return flightPost('next-now');
+}));
 $('fl-floor').addEventListener('change', (e) => flightAction(() => flightPost('config', { min_finish: Number(e.target.value) })));
 $('fl-sats').addEventListener('change', (e) => flightAction(() => flightPost('config', { min_sats: Number(e.target.value) || 10 })));
 $('fl-launch').addEventListener('click', () => flightAction(async () => {

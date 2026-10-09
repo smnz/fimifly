@@ -420,6 +420,11 @@ def api_flight_launch():
     return flight_call(lambda d: flight().launch())
 
 
+@app.post("/api/flight/next-now")
+def api_flight_next_now():
+    return flight_call(lambda d: flight().fly_next_now())
+
+
 @app.post("/api/flight/rth")
 def api_flight_rth():
     return flight_call(lambda d: flight().emergency_rth())
