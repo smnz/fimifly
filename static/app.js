@@ -181,19 +181,20 @@ const $ = (id) => document.getElementById(id);
 const MAX_ZOOM = 22;                    // how deep the map will zoom, imagery or not
 const PROBE_MIN = 14, PROBE_MAX = 21;   // range searched for real imagery coverage
 
+// Tiles come through the server (/tiles/...), which keeps every one on disk.
 const map = L.map('map', { zoomControl: true, worldCopyJump: true, maxZoom: MAX_ZOOM })
   .setView([20, 0], 2);                 // the world until a route opens (openRoute fits it)
 
 const sat = L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  '/tiles/sat/{z}/{x}/{y}',
   { maxZoom: MAX_ZOOM, maxNativeZoom: 19, attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics' });
 const labels = L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-  { maxZoom: MAX_ZOOM, maxNativeZoom: 19, opacity: 0.9 });
-const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  '/tiles/labels/{z}/{x}/{y}',
+  { maxZoom: MAX_ZOOM, maxNativeZoom: 19, opacity: 0.9, zIndex: 2 });   // stays above the imagery when that is re-added
+const streets = L.tileLayer('/tiles/streets/{z}/{x}/{y}',
   { maxZoom: MAX_ZOOM, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors' });
 const topo = L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+  '/tiles/topo/{z}/{x}/{y}',
   { maxZoom: MAX_ZOOM, maxNativeZoom: 19, attribution: 'Map data &copy; Esri' });
 
 sat.addTo(map);
@@ -212,7 +213,7 @@ L.control.scale({ imperial: false }).addTo(map);
 // service's tilemap endpoint does report real coverage, so probe it for the
 // current view and pin maxNativeZoom to the deepest level that actually has
 // imagery. Leaflet then upscales that last real tile for anything deeper.
-const TILEMAP = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tilemap/';
+const TILEMAP = '/tiles/satmap/';       // through the server's tile cache, as the tiles are
 const coverCache = new Map();
 
 function tileXY(lat, lng, z) {
@@ -227,7 +228,7 @@ function tileExists(lat, lng, z) {
   const { x, y } = tileXY(lat, lng, z);
   const key = z + '/' + y + '/' + x;
   if (!coverCache.has(key)) {
-    coverCache.set(key, fetch(TILEMAP + z + '/' + y + '/' + x + '/1/1?f=json')
+    coverCache.set(key, fetch(TILEMAP + z + '/' + x + '/' + y)
       .then((r) => r.json())
       .then((d) => Array.isArray(d.data) && d.data[0] === 1)
       .catch(() => true));   // network trouble: assume present, don't degrade the map
@@ -248,7 +249,11 @@ async function updateNativeZoom() {
     }
     if (sat.options.maxNativeZoom !== best) {
       sat.options.maxNativeZoom = best;
-      if (map.hasLayer(sat)) sat.redraw();
+      // Re-add rather than redraw(): redraw moves to the new tile zoom without
+      // rebuilding the grid, so tile x stays wrapped at the old zoom's world
+      // width and a deeper level asks for tiles half a world away (grey
+      // "Map data not yet available" ocean tiles).
+      if (map.hasLayer(sat)) { map.removeLayer(sat); map.addLayer(sat); }
     }
   })();
   try { await probing; } finally { probing = null; }
@@ -1079,28 +1084,36 @@ function northPois(points) {
   return points.map((q, i) => Object.assign({}, q, northPoi(points[i - 1] || q)));
 }
 
+// Local-metre helpers for the lead-in and tail points. Every photo point
+// carries its position x, y in metres east and north of the area's south-west
+// corner and the index of its line; plan.rowDir gives each line's direction of
+// travel along its axis and plan.acrossDir the direction the lines advance in.
+function rowFrame(plan, row) {
+  const a = plan.rowDir[row], c = plan.acrossDir;
+  return plan.rowsAlongEW ? { ax: a, ay: 0, cx: 0, cy: c } : { ax: 0, ay: a, cx: c, cy: 0 };
+}
+function localPoint(plan, x, y, kind) {
+  return { LATITUDE: plan.origin.lat + y / plan.mLat, LONGITUDE: plan.origin.lng + x / plan.mLng, x, y, kind };
+}
+function clearOfPhotos(plan, q) {
+  return plan.points.every((g) => Math.hypot(q.x - g.x, q.y - g.y) >= MIN_SPACING + 0.5);
+}
+function rowSpan(plan) {                           // a generous run along a line: past either end of the lattice
+  return (plan.rowsAlongEW ? plan.extEW + plan.fp.ew : plan.extNS + plan.fp.ns) + 2 * LEAD_OUT;
+}
+
 // Tail point: just past a route's last photo, half a spacing ahead along the
-// row and half a row toward the rows still to fly (the middle of the next
-// cell), or outside the grid along the row if the grid is too tight.
+// line and half a line toward the lines still to fly (the middle of the next
+// cell), or further ahead along the line if that cell is too tight.
 function tailPoint(plan, last) {
-  const pts = plan.points, per = plan.perLine;
-  const idx = pts.findIndex((q) => q.LATITUDE === last.LATITUDE && q.LONGITUDE === last.LONGITUDE);
-  const row = Math.floor(Math.max(idx, 0) / per), r0 = pts[row * per], r1 = pts[row * per + 1] || r0;
-  let ax = (r1.LONGITUDE - r0.LONGITUDE) * plan.mLng, ay = (r1.LATITUDE - r0.LATITUDE) * plan.mLat;
-  if (!ax && !ay) { ax = 1; ay = 0; }
-  const al = Math.hypot(ax, ay); ax /= al; ay /= al;
-  const nxt = pts[(row + 1) * per] || pts[(row - 1) * per] || r0;
-  let cx = -ay, cy = ax;
-  const dx = (nxt.LONGITUDE - r0.LONGITUDE) * plan.mLng, dy = (nxt.LATITUDE - r0.LATITUDE) * plan.mLat;
-  if (dx * cx + dy * cy < 0) { cx = -cx; cy = -cy; }
+  const f = rowFrame(plan, last.row);
+  const s = last.row < plan.rows.length - 1 ? 1 : -1;               // last line: lean back toward the one before
   const sAlong = plan.rowsAlongEW ? plan.stepEW : plan.stepNS, sAcross = plan.rowsAlongEW ? plan.stepNS : plan.stepEW;
-  const clear = (q) => pts.every((g) => haversine(q, g) >= MIN_SPACING + 0.5);
-  const at = (ex, ny) => ({ LATITUDE: last.LATITUDE + ny / plan.mLat, LONGITUDE: last.LONGITUDE + ex / plan.mLng, kind: 'tail' });
-  let q = at(ax * sAlong / 2 + cx * sAcross / 2, ay * sAlong / 2 + cy * sAcross / 2);
-  if (!clear(q)) {
-    const span = (plan.rowsAlongEW ? plan.extEW : plan.extNS) + 2 * LEAD_OUT;
+  let q = localPoint(plan, last.x + f.ax * sAlong / 2 + s * f.cx * sAcross / 2, last.y + f.ay * sAlong / 2 + s * f.cy * sAcross / 2, 'tail');
+  if (!clearOfPhotos(plan, q)) {
+    const span = rowSpan(plan);
     let ahead = 0;
-    do { ahead += 5; q = at(ax * ahead, ay * ahead); } while (!clear(q) && ahead < span);
+    do { ahead += 5; q = localPoint(plan, last.x + f.ax * ahead, last.y + f.ay * ahead, 'tail'); } while (!clearOfPhotos(plan, q) && ahead < span);
   }
   return Object.assign(q, northPoi(last));
 }
@@ -1111,39 +1124,26 @@ function tailPoint(plan, last) {
 // with its POI due north of point 1. No photo.
 const LEAD_OUT = 15;                            // metres outside the grid
 function gridLeadIn(plan, first) {
-  const south = first.LATITUDE <= plan.centre.lat;                 // point 1 on the south edge: lead in from the south
+  const south = first.LATITUDE <= plan.centre.lat;                 // point 1 on the south side: lead in from the south
   const q = { LATITUDE: first.LATITUDE + (south ? -LEAD_OUT : LEAD_OUT) / plan.mLat, LONGITUDE: first.LONGITUDE, kind: 'leadin' };
   return Object.assign(q, northPoi(first));
 }
 
 // Lead-in for a route that starts in the middle of the grid: behind its first
-// point along the row and half a row toward the rows already flown, i.e. the
-// middle of a grid cell, where it is clear of every photo point. If the grid
-// is too tight for that, it goes just outside the grid on the same row, and
-// the aircraft crabs along the row to the first point.
+// point along the line and half a line toward the lines already flown (toward
+// the next one on the first line), i.e. the middle of a grid cell, where it is
+// clear of every photo point. If the grid is too tight for that, it goes
+// further back along the same line, and the aircraft crabs along the line to
+// the first point.
 function midGridLeadIn(plan, first) {
-  const pts = plan.points, per = plan.perLine;
-  const idx = pts.findIndex((q) => q.LATITUDE === first.LATITUDE && q.LONGITUDE === first.LONGITUDE);
-  const row = Math.floor(Math.max(idx, 0) / per), r0 = pts[row * per], r1 = pts[row * per + 1] || r0;
-  let ax = (r1.LONGITUDE - r0.LONGITUDE) * plan.mLng, ay = (r1.LATITUDE - r0.LATITUDE) * plan.mLat;    // row travel direction
-  if (!ax && !ay) { ax = 1; ay = 0; }
-  const al = Math.hypot(ax, ay); ax /= al; ay /= al;
-  // across the rows, pointing away from the previous row: the perpendicular
-  // to the row direction, signed by where the neighbouring row lies (rows
-  // start at alternate ends, so their first points must not be compared directly)
-  const prev = pts[(row - 1) * per] || pts[(row + 1) * per] || r0;
-  let cx = -ay, cy = ax;
-  const dx = (r0.LONGITUDE - prev.LONGITUDE) * plan.mLng, dy = (r0.LATITUDE - prev.LATITUDE) * plan.mLat;
-  if (dx * cx + dy * cy < 0) { cx = -cx; cy = -cy; }
-  if (row === 0 && pts[per]) { cx = -cx; cy = -cy; }                                                   // no previous row: lean toward the next one instead
+  const f = rowFrame(plan, first.row);
+  const s = first.row > 0 ? -1 : 1;
   const sAlong = plan.rowsAlongEW ? plan.stepEW : plan.stepNS, sAcross = plan.rowsAlongEW ? plan.stepNS : plan.stepEW;
-  const clear = (q) => pts.every((g) => haversine(q, g) >= MIN_SPACING + 0.5);
-  const at = (dx, dy) => ({ LATITUDE: first.LATITUDE + dy / plan.mLat, LONGITUDE: first.LONGITUDE + dx / plan.mLng, kind: 'leadin' });
-  let q = at(-ax * sAlong / 2 - cx * sAcross / 2, -ay * sAlong / 2 - cy * sAcross / 2);               // cell centre, behind and on the flown side
-  if (!clear(q)) {                                                                                      // fall back: outside the grid, same row
-    const span = (plan.rowsAlongEW ? plan.extEW : plan.extNS) + 2 * LEAD_OUT;
+  let q = localPoint(plan, first.x - f.ax * sAlong / 2 + s * f.cx * sAcross / 2, first.y - f.ay * sAlong / 2 + s * f.cy * sAcross / 2, 'leadin');
+  if (!clearOfPhotos(plan, q)) {
+    const span = rowSpan(plan);
     let back = 0;
-    do { back += 5; q = at(-ax * back, -ay * back); } while (!clear(q) && back < span);
+    do { back += 5; q = localPoint(plan, first.x - f.ax * back, first.y - f.ay * back, 'leadin'); } while (!clearOfPhotos(plan, q) && back < span);
   }
   return Object.assign(q, northPoi(first));
 }
@@ -1203,25 +1203,26 @@ function obliqueRoute(plan, obliques) {
 // pitch. openfimi sets that pitch on the way to every waypoint (Gimbal mode
 // Before arrival); with the stock app the pilot sets it
 // by hand before flying the pass, which a uniform pitch makes possible.
+// The points sit on rays from the middle of the area, OBLIQUE_MARGIN past the
+// convex hull of the outline (the rectangle itself for a dragged area), so an
+// outline with bays still gets a ring the aircraft can fly around.
 // The POI sits inside the area, one line-of-sight run inward from the point,
 // or at the middle of the area if that is nearer.
 const OBLIQUE_MARGIN = 10;                      // metres outside the boundary
 function surveyObliques(plan, alt, count, pitchDeg) {
   if (!count) return [];
-  const c = plan.centre, halfEW = plan.extEW / 2 + OBLIQUE_MARGIN, halfNS = plan.extNS / 2 + OBLIQUE_MARGIN;
+  const c = plan.centreXY, hull = plan.hull;
   const run = alt / Math.tan(pitchDeg * Math.PI / 180);           // horizontal distance that gives the pitch
   const pts = [];
   for (let k = 0; k < count; k++) {
     const a = 2 * Math.PI * k / count;                              // bearing from the centre, from north
     const sx = Math.sin(a), cy = Math.cos(a);
-    const t = 1 / Math.max(Math.abs(sx) / halfEW, Math.abs(cy) / halfNS);   // ray from the centre to the expanded boundary
+    const t = rayToPolygon(c, { x: sx, y: cy }, hull) + OBLIQUE_MARGIN;
     const dx = sx * t, dy = cy * t;                                 // metres east and north of the centre
-    const dist = Math.hypot(dx, dy);
-    const f = Math.max(0, 1 - run / dist);                          // POI fraction of the way back toward the centre
-    const q = { LATITUDE: c.lat + dy / plan.mLat, LONGITUDE: c.lng + dx / plan.mLng, kind: 'oblique',
-                LATITUDE_POI: c.lat + dy * f / plan.mLat, LONGITUDE_POI: c.lng + dx * f / plan.mLng, ALTITUDE_POI: 0,
-                pitch: -Math.round(pitchDeg * 100) };
-    pts.push(q);
+    const f = Math.max(0, 1 - run / t);                             // POI fraction of the way back toward the centre
+    const q = localPoint(plan, c.x + dx, c.y + dy, 'oblique');
+    pts.push(Object.assign(q, { LATITUDE_POI: plan.centre.lat + dy * f / plan.mLat, LONGITUDE_POI: plan.centre.lng + dx * f / plan.mLng, ALTITUDE_POI: 0,
+                                pitch: -Math.round(pitchDeg * 100) }));
   }
   return pts;
 }
@@ -1242,40 +1243,136 @@ function footprint(altitude, zoom) {
   return { ew: 2 * altitude * tanD * a / d / z, ns: 2 * altitude * tanD * b / d / z };
 }
 
-// Photo centres along one axis: the area is cut into equal strips no wider
-// than the requested spacing and a photo is taken at the middle of each. The
-// outer lines therefore sit half a strip inside the boundary, the same gap as
-// half the line spacing, and the outer photos overhang the boundary by
-// (footprint - strip) / 2.
-function axisPositions(extent, fp, overlap) {
-  const n = Math.max(1, Math.ceil(extent / (fp * (1 - overlap)) - 1e-9));
-  const step = extent / n;
-  return Array.from({ length: n }, (_, k) => (k + 0.5) * step);
+// ------- plane geometry in local metres ({x, y}: east and north)
+function pointInPolygon(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > y) !== (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+function segmentHitsRect(a, b, r) {                // Liang-Barsky clip of segment a-b against an axis-aligned rectangle
+  let t0 = 0, t1 = 1;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  for (const [p, q] of [[-dx, a.x - r.x0], [dx, r.x1 - a.x], [-dy, a.y - r.y0], [dy, r.y1 - a.y]]) {
+    if (p === 0) { if (q < 0) return false; continue; }
+    const t = q / p;
+    if (p < 0) { if (t > t1) return false; if (t > t0) t0 = t; } else { if (t < t0) return false; if (t < t1) t1 = t; }
+  }
+  return true;
+}
+function rectHitsPolygon(r, poly) {
+  return pointInPolygon((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2, poly) ||
+         poly.some((p, i) => segmentHitsRect(p, poly[(i + 1) % poly.length], r));
+}
+function distToSegment(q, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.y - a.y) * dy) / l2)) : 0;
+  return Math.hypot(q.x - a.x - t * dx, q.y - a.y - t * dy);
+}
+function distToPolygon(q, poly) {
+  return Math.min(...poly.map((p, i) => distToSegment(q, p, poly[(i + 1) % poly.length])));
+}
+function polygonArea(poly) {
+  return Math.abs(poly.reduce((s, p, i) => { const n = poly[(i + 1) % poly.length]; return s + p.x * n.y - n.x * p.y; }, 0)) / 2;
+}
+function convexHull(pts) {                         // monotone chain, counter-clockwise
+  const p = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const half = (list) => { const h = []; for (const q of list) { while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); } h.pop(); return h; };
+  return [...half(p), ...half(p.slice().reverse())];
+}
+function rayToPolygon(o, d, poly) {                // furthest crossing of the ray o + t d with the outline
+  let best = 0;
+  poly.forEach((p, i) => {
+    const q = poly[(i + 1) % poly.length], ex = q.x - p.x, ey = q.y - p.y;
+    const den = d.x * ey - d.y * ex;
+    if (!den) return;
+    const t = ((p.x - o.x) * ey - (p.y - o.y) * ex) / den, u = ((p.x - o.x) * d.y - (p.y - o.y) * d.x) / den;
+    if (u >= 0 && u <= 1 && t > best) best = t;
+  });
+  return best;
+}
+function segmentsCross(a, b, c, d) {               // proper crossing, shared end points excluded
+  const o = (p, q, r) => Math.sign((q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x));
+  return o(a, b, c) * o(a, b, d) < 0 && o(c, d, a) * o(c, d, b) < 0;
+}
+function selfCrossing(poly) {
+  const n = poly.length;
+  for (let i = 0; i < n; i++) for (let j = i + 2; j < n; j++) {
+    if (i === 0 && j === n - 1) continue;          // neighbours across the closing edge
+    if (segmentsCross(poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n])) return true;
+  }
+  return false;
 }
 
-function surveyPlan(bounds, start, alt, zoom, overlap, lines) {
-  const sw = bounds.getSouthWest(), ne = bounds.getNorthEast();
+// Photo centres lie on a lattice spaced by the overlap, and every lattice photo
+// whose footprint reaches into the area is taken. Any spot in the area, right
+// up to the boundary, is then in as many photos as a spot in the middle: the
+// outer lines run past the boundary as far as the field of view needs instead
+// of stopping inside it. A photo only counts for a spot that lies EDGE_MARGIN
+// inside its frame, away from the corner-softened rim. Each axis is centred on
+// the area's bounding box with the fewest lattice points that still do this:
+// n points whose footprints reach into an extent are those in an open
+// interval of length extent + footprint, and centring n = ceil(span/step) - 1
+// of them leaves the next ones out on both sides.
+const EDGE_MARGIN = 1;                          // metres
+function latticeAxis(extent, fp, overlap) {
+  const step = fp * (1 - overlap);
+  const span = extent + fp - 2 * EDGE_MARGIN;
+  const n = Math.max(1, Math.ceil(span / step) - 1);
+  const first = extent / 2 - (n - 1) * step / 2;
+  return { step, pos: Array.from({ length: n }, (_, k) => first + k * step) };
+}
+
+// area: the outline's corners as LatLngs (a dragged rectangle is four of them).
+// start: where drawing began; the flight starts in the lattice corner nearest it.
+function surveyPlan(area, start, alt, zoom, overlap, lines) {
+  const lats = area.map((p) => p.lat), lngs = area.map((p) => p.lng);
+  const sw = { lat: Math.min(...lats), lng: Math.min(...lngs) }, ne = { lat: Math.max(...lats), lng: Math.max(...lngs) };
   const mLat = M_PER_DEG, mLng = M_PER_DEG * Math.cos((sw.lat + ne.lat) / 2 * Math.PI / 180);
+  const poly = area.map((p) => ({ x: (p.lng - sw.lng) * mLng, y: (p.lat - sw.lat) * mLat }));
   const extEW = (ne.lng - sw.lng) * mLng, extNS = (ne.lat - sw.lat) * mLat;
   const fp = footprint(alt, zoom);
-  const xs = axisPositions(extEW, fp.ew, overlap), ys = axisPositions(extNS, fp.ns, overlap);
-  const rowsAlongEW = lines === 'ew' ? true : lines === 'ns' ? false : xs.length >= ys.length;
-  // start in the corner nearest to where the drag began
-  const xo = Math.abs(start.lng - sw.lng) <= Math.abs(start.lng - ne.lng) ? xs : xs.slice().reverse();
-  const yo = Math.abs(start.lat - sw.lat) <= Math.abs(start.lat - ne.lat) ? ys : ys.slice().reverse();
-  const grid = [];
-  if (rowsAlongEW) yo.forEach((y, i) => (i % 2 ? xo.slice().reverse() : xo).forEach((x) => grid.push({ x, y })));
-  else xo.forEach((x, i) => (i % 2 ? yo.slice().reverse() : yo).forEach((y) => grid.push({ x, y })));
-  const points = grid.map((g) => ({ LATITUDE: sw.lat + g.y / mLat, LONGITUDE: sw.lng + g.x / mLng }));
+  const ax = latticeAxis(extEW, fp.ew, overlap), ay = latticeAxis(extNS, fp.ns, overlap);
+  const hx = fp.ew / 2 - EDGE_MARGIN, hy = fp.ns / 2 - EDGE_MARGIN;
+  const keep = ay.pos.map((y) => ax.pos.map((x) => rectHitsPolygon({ x0: x - hx, x1: x + hx, y0: y - hy, y1: y + hy }, poly)));   // keep[j][i]
+  const nRows = keep.filter((r) => r.some(Boolean)).length;                       // east-west lines
+  const nCols = ax.pos.filter((_, i) => keep.some((r) => r[i])).length;           // north-south lines
+  const rowsAlongEW = lines === 'ew' ? true : lines === 'ns' ? false : nCols >= nRows;
+  // start in the corner nearest to where drawing began
+  const fromWest = Math.abs(start.lng - sw.lng) <= Math.abs(start.lng - ne.lng);
+  const fromSouth = Math.abs(start.lat - sw.lat) <= Math.abs(start.lat - ne.lat);
+  const xi = [...ax.pos.keys()], yi = [...ay.pos.keys()];
+  if (!fromWest) xi.reverse();
+  if (!fromSouth) yi.reverse();
+  const rows = [], rowDir = [];
+  for (const o of rowsAlongEW ? yi : xi) {
+    const run = (rowsAlongEW ? xi : yi).filter((n) => (rowsAlongEW ? keep[o][n] : keep[n][o]));
+    if (!run.length) continue;                                                    // an outline's line may miss it entirely
+    const back = rows.length % 2 === 1, row = rows.length;
+    if (back) run.reverse();
+    rows.push(run.map((n) => {
+      const x = ax.pos[rowsAlongEW ? n : o], y = ay.pos[rowsAlongEW ? o : n];
+      return { LATITUDE: sw.lat + y / mLat, LONGITUDE: sw.lng + x / mLng, x, y, row };
+    }));
+    rowDir.push((rowsAlongEW ? fromWest : fromSouth) !== back ? 1 : -1);
+  }
+  const points = rows.flat();
+  const hull = convexHull(poly);
+  const centreXY = { x: hull.reduce((s, p) => s + p.x, 0) / hull.length, y: hull.reduce((s, p) => s + p.y, 0) / hull.length };
+  const outside = Math.max(0, ...points.filter((q) => !pointInPolygon(q.x, q.y, poly)).map((q) => distToPolygon(q, poly)));
   return {
-    points, fp, extEW, extNS, mLat, mLng, rowsAlongEW,
-    centre: { lat: (sw.lat + ne.lat) / 2, lng: (sw.lng + ne.lng) / 2 },
-    lines: rowsAlongEW ? ys.length : xs.length,
-    perLine: rowsAlongEW ? xs.length : ys.length,
-    stepEW: xs.length > 1 ? xs[1] - xs[0] : 0,
-    stepNS: ys.length > 1 ? ys[1] - ys[0] : 0,
-    overEW: (fp.ew - extEW / xs.length) / 2,   // how far the outer photos reach past the boundary
-    overNS: (fp.ns - extNS / ys.length) / 2,
+    points, rows, rowDir, acrossDir: (rowsAlongEW ? fromSouth : fromWest) ? 1 : -1,
+    fp, extEW, extNS, mLat, mLng, rowsAlongEW, origin: sw, poly, hull, centreXY,
+    centre: { lat: sw.lat + centreXY.y / mLat, lng: sw.lng + centreXY.x / mLng },
+    areaM2: polygonArea(poly),
+    lines: rows.length,
+    nEW: ax.pos.length, nNS: ay.pos.length,       // lattice size; lines of an outline may be shorter
+    stepEW: ax.step, stepNS: ay.step,
+    outside,                                      // furthest photo centre outside the boundary, metres
+    cover: [Math.floor(2 * hx / ax.step), Math.floor(2 * hy / ay.step)],   // photos every spot is in, per axis, at least
   };
 }
 
@@ -1307,35 +1404,40 @@ function surveyEnter() {
   try { folded = localStorage.getItem('surveyFolded') === '1'; } catch (e) { /* ignore */ }
   surveyFold(folded);
   $('survey').disabled = true;
-  map.dragging.disable();
   map.boxZoom.disable();
+  map.doubleClickZoom.disable();                      // a double click closes an outline
   $('map').classList.add('survey-draw');
   map.on('mousedown', svDown);
   map.on('mousemove', svMove);
   map.on('mouseup', svUp);
+  map.on('click', svClick);
+  map.on('dblclick', svDblClick);
   document.addEventListener('mouseup', svUpDoc);
   surveyReset();
 }
 
 function surveyExit() {
   const sv = state.survey;
-  sv.active = false; sv.drawing = false; sv.bounds = null; sv.plan = null;
+  sv.active = false; sv.drawing = false; sv.area = null; sv.verts = []; sv.plan = null;
   drawMap();                                          // bring the open route back
   $('surveypanel').hidden = true;
   $('survey').disabled = false;
   map.dragging.enable();
   map.boxZoom.enable();
+  map.doubleClickZoom.enable();
   $('map').classList.remove('survey-draw');
   map.off('mousedown', svDown);
   map.off('mousemove', svMove);
   map.off('mouseup', svUp);
+  map.off('click', svClick);
+  map.off('dblclick', svDblClick);
   document.removeEventListener('mouseup', svUpDoc);
   surveyLayers.clearLayers();
   surveyRect = null;
 }
 
 // Fold the panel up to its title bar so the map is clear for drawing; the
-// rectangle, stats and Create button keep working underneath. Remembered per browser.
+// area, stats and Create button keep working underneath. Remembered per browser.
 function surveyFold(folded) {
   $('surveypanel').classList.toggle('folded', folded);
   $('surveyfold').innerHTML = folded ? '&#9662;' : '&#9652;';
@@ -1344,22 +1446,31 @@ function surveyFold(folded) {
   try { localStorage.setItem('surveyFolded', folded ? '1' : ''); } catch (e) { /* storage blocked: fold just isn't remembered */ }
 }
 
+// The area is either a dragged rectangle or an outline clicked corner by
+// corner. A rectangle drag needs the map's own dragging off; while clicking an
+// outline the map still pans, and Leaflet sends no click after a pan.
+function surveyShape() { return $('sv-shape').value; }
+
 function surveyReset() {
   const sv = state.survey;
-  sv.drawing = false; sv.bounds = null; sv.plan = null; sv.parts = null; sv.high = null; sv.highParts = []; sv.obliques = []; sv.obliqueParts = [];
+  sv.drawing = false; sv.area = null; sv.verts = []; sv.plan = null; sv.parts = null; sv.high = null; sv.highParts = []; sv.obliques = []; sv.obliqueParts = [];
   syncSpeedField();
   surveyLayers.clearLayers();
   surveyRect = null;
+  const poly = surveyShape() === 'poly';
+  if (poly) map.dragging.enable(); else map.dragging.disable();
   $('sv-area').value = '';
   $('surveystats').textContent = '';
   $('surveycreate').disabled = true;
-  $('surveyhint').textContent = 'Drag a rectangle on the map to mark the survey area.';
-  setStatus('Survey: drag a rectangle on the map', 'dirty');
+  $('surveyhint').textContent = poly
+    ? 'Click the corners of the survey area. Click the first corner again, double-click or press Enter to close it; Backspace removes the last corner. Drag to pan.'
+    : 'Drag a rectangle on the map to mark the survey area.';
+  setStatus(poly ? 'Survey: click the corners of the area' : 'Survey: drag a rectangle on the map', 'dirty');
 }
 
 function svDown(e) {
   const sv = state.survey;
-  if (sv.drawing) return;
+  if (sv.drawing || surveyShape() !== 'rect') return;
   sv.drawing = true;
   sv.start = e.latlng; sv.last = e.latlng;
   surveyLayers.clearLayers();
@@ -1371,10 +1482,11 @@ function svMove(e) {
   const sv = state.survey;
   if (!sv.drawing) return;
   sv.last = e.latlng;
-  surveyRect.setBounds(L.latLngBounds(sv.start, e.latlng));
+  if (surveyShape() === 'rect') surveyRect.setBounds(L.latLngBounds(sv.start, e.latlng));
+  else if (sv.rubber) sv.rubber.setLatLngs([sv.verts[sv.verts.length - 1], e.latlng]);
 }
-function svUp(e) { svFinish(e.latlng); }
-function svUpDoc() { if (state.survey.drawing) svFinish(state.survey.last); }
+function svUp(e) { if (surveyShape() === 'rect') svFinish(e.latlng); }
+function svUpDoc() { if (state.survey.drawing && surveyShape() === 'rect') svFinish(state.survey.last); }
 
 function svFinish(end) {
   const sv = state.survey;
@@ -1387,28 +1499,74 @@ function svFinish(end) {
     $('surveyhint').textContent = 'That was a click — press and drag to draw the area.';
     return;
   }
-  sv.bounds = b;
-  surveyRect.setBounds(b);
+  sv.area = [b.getSouthWest(), b.getNorthWest(), b.getNorthEast(), b.getSouthEast()];
   $('surveyhint').textContent = 'Adjust the parameters, then create the routes. Drag again to redraw the area.';
+  surveyRecompute();
+}
+
+// Outline drawing: each click adds a corner; a click within a few pixels of
+// the last corner is the second half of a double click and is dropped.
+function svClick(e) {
+  const sv = state.survey;
+  if (surveyShape() !== 'poly' || sv.area) return;    // a finished outline stays until Redraw area
+  const px = (ll) => map.latLngToContainerPoint(ll);
+  const near = (ll, r) => px(ll).distanceTo(px(e.latlng)) < r;
+  if (sv.verts.length >= 3 && near(sv.verts[0], 10)) { svClose(); return; }
+  if (sv.verts.length && near(sv.verts[sv.verts.length - 1], 4)) return;
+  if (!sv.verts.length) sv.start = e.latlng;
+  sv.verts.push(e.latlng);
+  sv.drawing = true; sv.last = e.latlng;
+  svDrawOutline();
+}
+function svDblClick() { if (surveyShape() === 'poly' && state.survey.drawing) svClose(); }
+
+function svDrawOutline() {
+  const sv = state.survey;
+  surveyLayers.clearLayers();
+  if (!sv.verts.length) { sv.rubber = null; return; }
+  if (sv.verts.length > 1) L.polyline(sv.verts, { color: '#2ee6a8', weight: 2, dashArray: '6 4', interactive: false }).addTo(surveyLayers);
+  sv.rubber = L.polyline([sv.verts[sv.verts.length - 1], sv.last], { color: '#2ee6a8', weight: 1, dashArray: '2 4', opacity: 0.7, interactive: false }).addTo(surveyLayers);
+  sv.verts.forEach((v, i) => L.circleMarker(v, { radius: i === 0 ? 6 : 4, color: i === 0 ? '#ffcc55' : '#2ee6a8', weight: 2, fillColor: '#12161c', fillOpacity: 1, interactive: false }).addTo(surveyLayers));
+}
+
+function svUndoCorner() {
+  const sv = state.survey;
+  sv.verts.pop();
+  if (!sv.verts.length) sv.drawing = false;
+  svDrawOutline();
+}
+
+function svClose() {
+  const sv = state.survey;
+  if (sv.verts.length < 3) { $('surveyhint').textContent = 'An outline needs at least three corners.'; return; }
+  const m = M_PER_DEG, mLng = m * Math.cos(sv.verts[0].lat * Math.PI / 180);
+  if (selfCrossing(sv.verts.map((v) => ({ x: v.lng * mLng, y: v.lat * m })))) {
+    $('surveyhint').textContent = 'The outline crosses itself. Backspace to remove corners, or Redraw area.';
+    return;
+  }
+  sv.drawing = false; sv.rubber = null;
+  sv.area = sv.verts.slice();
+  $('surveyhint').textContent = 'Adjust the parameters, then create the routes. Redraw area to start a new outline.';
   surveyRecompute();
 }
 
 function surveyRecompute() {
   const sv = state.survey;
-  if (!sv.bounds) return;
+  if (!sv.area) return;
   const { alt, zoom, overlap, lines: lineDir, heading, leadins, settle, speed, highAlt, obliques, obliquePitch } = surveyParams();
-  const plan = surveyPlan(sv.bounds, sv.start, alt, zoom, overlap, lineDir);
+  const plan = surveyPlan(sv.area, sv.start, alt, zoom, overlap, lineDir);
   sv.plan = plan;
   sv.parts = surveyRoutes(plan, plan.points, heading, leadins);
   sv.obliques = surveyObliques(plan, alt, obliques, obliquePitch);
   const obl = obliqueRoute(plan, sv.obliques);
   sv.obliqueParts = surveyParts(leadins === 'none' ? obl.slice(1) : obl);
-  sv.high = highAlt > alt ? surveyPlan(sv.bounds, sv.start, highAlt, zoom, overlap, lineDir) : null;
+  sv.high = highAlt > alt ? surveyPlan(sv.area, sv.start, highAlt, zoom, overlap, lineDir) : null;
   sv.highParts = sv.high ? surveyRoutes(sv.high, sv.high.points, heading, leadins) : [];
 
   // preview: path, photo centres, and the footprint of the first photo
   surveyLayers.clearLayers();
-  surveyRect = L.rectangle(sv.bounds, { color: '#2ee6a8', weight: 2, dashArray: '6 4', fillOpacity: 0.08 }).addTo(surveyLayers);
+  L.polygon(sv.area, { color: '#2ee6a8', weight: 2, dashArray: '6 4', fillOpacity: 0.08 }).addTo(surveyLayers);
+  surveyRect = null;
   const pts = plan.points;
   const p0 = pts[0];
   L.rectangle([[p0.LATITUDE - plan.fp.ns / 2 / plan.mLat, p0.LONGITUDE - plan.fp.ew / 2 / plan.mLng],
@@ -1441,16 +1599,16 @@ function surveyRecompute() {
   const nPhotos = n + sv.obliques.length + (sv.high ? sv.high.points.length : 0);
   const len = pathLength(flown) + pathLength(sv.obliqueParts.flat()) + (sv.high ? pathLength(sv.highParts.flat()) : 0);
   const secs = estimateTime(flown, speed) + estimateTime(sv.obliqueParts.flat(), speed) + (sv.high ? estimateTime(sv.highParts.flat(), speed) : 0);
-  $('sv-area').value = Math.round(plan.extEW) + ' × ' + Math.round(plan.extNS) + ' m';
+  $('sv-area').value = Math.round(plan.extEW) + ' × ' + Math.round(plan.extNS) + ' m, ' + (plan.areaM2 / 10000).toFixed(2) + ' ha';
   const lines = [
     'Footprint per photo: ' + plan.fp.ew.toFixed(1) + ' m E-W × ' + plan.fp.ns.toFixed(1) + ' m N-S at ' + alt + ' m, ' + zoom + '×',
-    'Photo spacing: ' + (plan.stepEW ? plan.stepEW.toFixed(1) + ' m E-W' : 'single column') + ', ' + (plan.stepNS ? plan.stepNS.toFixed(1) + ' m N-S' : 'single row'),
-    plan.lines + ' line' + (plan.lines === 1 ? '' : 's') + ' × ' + plan.perLine + ' photo' + (plan.perLine === 1 ? '' : 's') + (nLead ? ' + ' + nLead + ' lead-in/tail point' + (nLead === 1 ? '' : 's') : '') + ' = ' + flown.length + ' waypoints in ' + parts.length + ' route' + (parts.length === 1 ? '' : 's') + ' of up to ' + PART_SIZE,
+    'Photo spacing: ' + (plan.nEW > 1 ? plan.stepEW.toFixed(1) + ' m E-W' : 'single column') + ', ' + (plan.nNS > 1 ? plan.stepNS.toFixed(1) + ' m N-S' : 'single row'),
+    plan.lines + ' line' + (plan.lines === 1 ? '' : 's') + ', ' + n + ' photo' + (n === 1 ? '' : 's') + (nLead ? ' + ' + nLead + ' lead-in/tail point' + (nLead === 1 ? '' : 's') : '') + ' = ' + flown.length + ' waypoints in ' + parts.length + ' route' + (parts.length === 1 ? '' : 's') + ' of up to ' + PART_SIZE,
     'Lines ' + (plan.rowsAlongEW ? 'east-west, flown sideways' : 'north-south, flown forwards and backwards') + (heading === 'poi' ? ' with the nose turned north by POIs (each stored one waypoint late, as the aircraft applies them)' : ' with the nose pointed north by the lead-in and held by Free mode') + ', at ' + speedText(speed, 1),
     settle ? 'Each photo after a 5 s hover, so the heading has settled (measured 3-5° lean into the direction of travel without it)' : 'Single photo on arrival: expect a 3-5° lean into the direction of travel on the row photos',
     sv.obliques.length ? 'Oblique pass: ' + sv.obliques.length + ' photos around the area looking inward at ' + obliquePitch + '° down, plus a lead-in, in ' + sv.obliqueParts.length + ' more route' + (sv.obliqueParts.length === 1 ? '' : 's') + '; openfimi holds the gimbal at ' + obliquePitch + '° down, re-set on the way to every point (with the FIMI app, set it by hand)' : 'No obliques',
     sv.high ? 'High pass at ' + highAlt + ' m: ' + sv.high.points.length + ' photos plus a lead-in in ' + sv.highParts.length + ' more route' + (sv.highParts.length === 1 ? '' : 's') : 'No high pass',
-    'Outer photos reach ' + plan.overEW.toFixed(1) + ' m E-W and ' + plan.overNS.toFixed(1) + ' m N-S past the boundary',
+    'Every spot in the area, edges included, is in at least ' + plan.cover[0] + ' × ' + plan.cover[1] + ' = ' + plan.cover[0] * plan.cover[1] + ' photos; to get that, photo points run up to ' + Math.round(plan.outside) + ' m outside the boundary' + (sv.high ? ' (' + Math.round(sv.high.outside) + ' m on the high pass)' : ''),
     'Path ' + Math.round(len) + ' m, about ' + Math.round((secs + (settle ? 5 * nPhotos : 0)) / 60) + ' min' + (settle ? ' including the hovers' : ' before photo dwell'),
   ];
   const box = $('surveystats');
@@ -1460,7 +1618,7 @@ function surveyRecompute() {
   const warn = (t) => { const d = document.createElement('div'); d.className = 'warn'; d.textContent = t; box.appendChild(d); };
   if (!plan.rowsAlongEW) warn('North-south lines are flown forwards and backwards; in tests the -90 gimbal crept up on those legs. East-west lines held it.');
   if (highAlt > 0 && highAlt <= alt) warn('High pass ignored: ' + highAlt + ' m is not above the survey altitude of ' + alt + ' m. It is an altitude above take-off, not an extra height.');
-  const tight = [plan.stepEW, plan.stepNS].filter((v) => v > 0);
+  const tight = [plan.nEW > 1 ? plan.stepEW : 0, plan.nNS > 1 ? plan.stepNS : 0].filter((v) => v > 0);
   if (tight.length && Math.min(...tight) < MIN_SPACING) {
     warn('Photo spacing under ' + MIN_SPACING + ' m: the app refuses waypoints that close together. Fly higher or lower the overlap.');
   }
@@ -1555,6 +1713,7 @@ $('survey').addEventListener('click', surveyEnter);
 $('surveyclose').addEventListener('click', surveyExit);
 $('surveyfold').addEventListener('click', () => surveyFold(!$('surveypanel').classList.contains('folded')));
 $('surveyredraw').addEventListener('click', surveyReset);
+$('sv-shape').addEventListener('change', surveyReset);
 $('surveycreate').addEventListener('click', surveyCreate);
 for (const id of ['sv-alt', 'sv-zoom', 'sv-overlap', 'sv-speed', 'sv-high', 'sv-oblpitch']) $(id).addEventListener('input', surveyRecompute);
 for (const id of ['sv-lines', 'sv-obliques', 'sv-leadins', 'sv-settle', 'sv-heading']) $(id).addEventListener('change', surveyRecompute);
@@ -1594,6 +1753,11 @@ $('rawmode').addEventListener('change', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('lightbox').hidden) { $('lightbox').hidden = true; return; }
   if (e.key === 'Escape' && state.poiPick >= 0) { endPoiPick(); setStatus(state.dirty ? 'Unsaved changes' : '', state.dirty ? 'dirty' : ''); return; }
+  if (state.survey.active && state.survey.drawing && surveyShape() === 'poly' && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {
+    if (e.key === 'Escape') { surveyReset(); return; }                  // drop the half-drawn outline, stay in the planner
+    if (e.key === 'Backspace') { e.preventDefault(); svUndoCorner(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); svClose(); return; }
+  }
   if (e.key === 'Escape' && state.survey.active) { surveyExit(); setStatus(''); return; }
   if (e.ctrlKey && e.key === 's' && !state.flight) { e.preventDefault(); if (!$('save').disabled) save(); }
   if (e.key === 'Delete' && state.sel >= 0 && !state.flight && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) {

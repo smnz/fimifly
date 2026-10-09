@@ -4,6 +4,7 @@ __pycache__/
 # flight data and outputs, kept locally
 photos/
 recordings/
+tilecache/
 odm/*/
 *.db
 

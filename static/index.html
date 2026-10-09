@@ -32,7 +32,7 @@
     <div class="panel-head">
       <span>Routes</span>
       <span class="head-btns">
-        <button id="survey" class="mini" title="Plan a grid of overhead photos over a rectangle and create the routes for it">+ Grid</button>
+        <button id="survey" class="mini" title="Plan a grid of overhead photos over a rectangle or outlined area and create the routes for it">+ Grid</button>
         <button id="newroute" class="mini">+ New</button>
       </span>
     </div>
@@ -56,6 +56,7 @@
       <div id="surveybody">
         <p id="surveyhint" class="hint"></p>
         <div class="form">
+          <label><span>Area shape</span><select id="sv-shape"><option value="rect">Rectangle (drag)</option><option value="poly">Outline (click corners)</option></select></label>
           <label><span>Survey altitude (m)</span><input id="sv-alt" type="number" min="1" max="500" step="1" value="60"></label>
           <label><span>Camera zoom (×, 1–6)</span><input id="sv-zoom" type="number" min="1" max="6" step="0.1" value="1"></label>
           <label><span>Image overlap (%)</span><input id="sv-overlap" type="number" min="0" max="90" step="1" value="70"></label>
@@ -70,7 +71,7 @@
           <label><span>High pass altitude (m above take-off, blank = off)</span><input id="sv-high" type="number" min="0" max="500" step="5" placeholder="off"></label>
         </div>
         <div id="surveystats" class="stats"></div>
-        <p class="hint">Camera model: 79° diagonal field of view, 4:3 stills, digital zoom crops the frame; ground assumed flat at the take-off point. Routes are saved straight to the database as favourites, 20 waypoints each; every route but the last ends in a hover where the next begins, and each is linked to the next (its Next route), so openfimi flies them back to back, battery permitting. With the default heading, every waypoint carries a point of interest 500 m due north of the waypoint before it, because the aircraft applies a waypoint's POI to the photo taken at the point before (measured on three flights), and each route ends with a photo-less tail point carrying the POI for its last photo; the 5 s hover lets the turn settle before the shutter; with the lead-in option only the lead-in carries a POI and Free mode holds the heading. East-west lines are flown sideways, which keeps a −90° gimbal in place. Flown with openfimi, every waypoint re-sets the gimbal to the route's pitch (straight down for the grid) on the way in, so any slight drift is corrected before each photo; with the FIMI app nothing in a route can move the gimbal, so set it by hand before starting. The oblique pass is a separate route around the outside of the area, every point looking inward at a ground target placed so the view dips by the chosen pitch. Every waypoint gets the same speed, so the FIMI app and openfimi fly it alike. The high pass repeats the grid higher up as extra routes to fly afterwards.</p>
+        <p class="hint">Camera model: 79° diagonal field of view, 4:3 stills, digital zoom crops the frame; ground assumed flat at the take-off point. Photos sit on a lattice spaced by the overlap, and every photo whose frame reaches into the area is taken, so the lines run past the boundary as far as the field of view needs and a spot on the edge is in as many photos as one in the middle; leave clear airspace around the area for that. Routes are saved straight to the database as favourites, 20 waypoints each; every route but the last ends in a hover where the next begins, and each is linked to the next (its Next route), so openfimi flies them back to back, battery permitting. With the default heading, every waypoint carries a point of interest 500 m due north of the waypoint before it, because the aircraft applies a waypoint's POI to the photo taken at the point before (measured on three flights), and each route ends with a photo-less tail point carrying the POI for its last photo; the 5 s hover lets the turn settle before the shutter; with the lead-in option only the lead-in carries a POI and Free mode holds the heading. East-west lines are flown sideways, which keeps a −90° gimbal in place. Flown with openfimi, every waypoint re-sets the gimbal to the route's pitch (straight down for the grid) on the way in, so any slight drift is corrected before each photo; with the FIMI app nothing in a route can move the gimbal, so set it by hand before starting. The oblique pass is a separate route around the outside of the area, every point looking inward at a ground target placed so the view dips by the chosen pitch. Every waypoint gets the same speed, so the FIMI app and openfimi fly it alike. The high pass repeats the grid higher up as extra routes to fly afterwards.</p>
         <div class="row-btns pad">
           <button id="surveyredraw" class="mini">Redraw area</button>
           <span class="spacer"></span>

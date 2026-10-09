@@ -12,7 +12,10 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import quote
 from xml.sax.saxutils import escape
 
@@ -21,6 +24,7 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("FIMI_DB", os.path.join(HERE, "fimi.db"))
 PHOTO_ROOT = os.environ.get("FIMI_PHOTOS", os.path.join(HERE, "photos"))   # one sub-folder per route id
+TILE_ROOT = os.environ.get("FIMI_TILES", os.path.join(HERE, "tilecache"))   # map tiles, one folder per layer
 
 app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="")
 
@@ -157,6 +161,60 @@ def write_points(conn, rid, points):
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
+
+
+# ---------------------------------------------------------------- map tiles
+# The map's tiles come through here and are kept on disk, so each one is
+# fetched from the provider once: panning around the same farm no longer
+# re-downloads it (Esri and OSM both throttle heavy repeat use, and OSM's
+# policy asks for exactly this), and cached areas keep working with no
+# internet in the field. Tiles never expire; delete the folder to refresh.
+# Esri's imagery coverage probe (the tilemap endpoint) is cached the same way.
+ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/"
+TILE_SOURCES = {                       # layer -> URL template ({z}/{x}/{y})
+    "sat": ESRI + "World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    "labels": ESRI + "Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    "topo": ESRI + "World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+    "streets": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "satmap": ESRI + "World_Imagery/MapServer/tilemap/{z}/{y}/{x}/1/1?f=json",
+}
+TILE_UA = "fimifly route editor (local tile cache)"
+
+
+def tile_type(data):
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:1] in (b"{", b"["):
+        return "application/json"
+    return "application/octet-stream"
+
+
+@app.get("/tiles/<layer>/<int:z>/<int:x>/<int:y>")
+def tile(layer, z, x, y):
+    if layer not in TILE_SOURCES or not 0 <= z <= 23 or not (0 <= x < 2 ** z and 0 <= y < 2 ** z):
+        abort(404)
+    path = os.path.join(TILE_ROOT, layer, str(z), str(x), str(y))
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        url = TILE_SOURCES[layer].format(z=z, x=x, y=y)
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": TILE_UA}), timeout=20) as r:
+                data = r.read()
+        except urllib.error.HTTPError as e:
+            abort(e.code if e.code in (404, 429) else 502)
+        except OSError:
+            abort(504)                 # offline or the provider is unreachable; nothing cached
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)          # atomic: a concurrent request never reads half a tile
+    return Response(data, mimetype=tile_type(data),
+                    headers={"Cache-Control": "public, max-age=2592000"})   # and the browser keeps it 30 days
 
 
 @app.get("/api/db")
