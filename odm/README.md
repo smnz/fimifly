@@ -14,3 +14,11 @@
 Useful extras: `--dtm` for a bare-earth model, `--pc-quality high` for a denser cloud,
 `--fast-orthophoto` for a quick look without the mesh, `--rerun-all` to start over.
 Project folders are ignored by git; only these scripts are tracked.
+
+## Keep `grid27sep/` — it is the Property Map reference
+
+The Erewhon app's Property Map (`erewhon/scripts/make_ortho_tiles.sh`) registers
+every new orthophoto to `odm/grid27sep/odm_orthophoto/odm_orthophoto.tif`, the
+2026-09-27 survey that the pipes, cables and soil grid are drawn on. Don't
+delete or move it; if it must move, update `source` in
+`erewhon/website/info/property-map/tiles/2026-09-27/meta.json` to match.
